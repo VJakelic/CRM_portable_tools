@@ -1,0 +1,298 @@
+
+&model_H
+nsp=46,            ! Total number of species (=nH+6)
+nsp_bg=12,         ! Number of background species: H(n=1,36-40),H2(X),Hp,H2p,H3p,Hm,e
+ntemp=4,           ! Number of temperatures: TH,Te,Tvib(H2(X)),THm
+nH=40,             ! Number of levels of the H atom
+/
+
+&model_Cs
+nsp=20,            ! Total number of species (=nCs+5)
+nsp_bg=6,          ! Number of background species: Cs(n=1),Csp,e,H,Hp,Hm
+ntemp=4,           ! Number of temperatures: TCs,Te,TH,THm
+nCs=15,            ! Number of levels of the Cs atom
+/
+
+&thermo_H
+qdir="/Desktop/CRM_4/data/H/",                            ! Partition function directory
+/
+
+&thermo_H2
+levdir="/Desktop/CRM_4/data/H2/",                         ! Level data directory
+pX_type=1,         ! Vibro-rotational populations of the ground state (1: Bruno, 2: Briefi)
+/
+
+&line_data
+n_Balmer=3,        ! Number of Balmer lines
+n_Cslines=0,       ! Number of Cs lines (0-45)
+/
+
+! Choose the Cs lines among 45 possibilities
+! Check Cs/chem_Cs: Calc_Einstein_exact for a list
+&Cs_data
+!w_Cslines(1)=3,    ! Cs_8-1
+!w_Cslines(2)=5,    ! Cs_14-2
+!w_Cslines(3)=6,    ! Cs_15-3
+!w_Cslines(4)=10,   ! Cs_3-1
+!w_Cslines(5)=15,   ! Cs_2-1
+!w_Cslines(6)=16,   ! Cs_10-3
+/
+
+&cond_data
+lcond(1)=.TRUE.,    ! T: work with H [m^-3], F: work with xH=H/H2
+lcond(2)=.TRUE.,    ! T: work with ion number densities [m^-3], F: work with ion fractions
+lcond(3)=.FALSE.,    ! T: work with Cs+ [m^-3], F: work with xCs=Cs+/Cs
+lcond(4)=.FALSE.,    ! T: pressure is enforced, F: p=fH*H+fH2*H2
+lcond(5)=.TRUE.,     ! T: electroneutrality is enforced on H3+
+/
+
+&temp_data
+TH=1.0d4,          ! Translational temperature of H atoms [K]
+Te=0.0d0,          ! Electron temperature [eV]
+Tvib=4.0d3,        ! H2 vibrational temperature (K)
+THm=1.0d4,         ! Translational temperature of H- ions [K]
+Tr1=6.0d2,         ! H2 cold rotational temperature (K)
+Tr2=4.0d3,         ! H2 hot rotational temperature (K)
+b0=8.0d-2,
+b1=2.0d-1,
+TCs=6.0d2,         ! Translational temperature of Cs atoms [K]
+/
+
+&comp_data
+H=1.0d18,          ! H [m^-3] or H/H2
+Hp=1.0d17,         ! H+ [m^-3] or H+/(e+H-)
+e=5.0d17,          ! e- [m^-3]
+H2p=1.0d17,         ! H2+ [m^-3] or (H+ + H2+)/(e+H-)
+H3p=5.0d16,         ! H3+ [m^-3]
+Hm=0.0d0,         ! H- [m^-3]
+H2=2.0d19,         ! H2 [m^-3]
+Cs=0.0d0,         ! Cs [m^-3]
+Csp=0.0d0,         ! Cs+ [m^-3] or Cs+/Cs
+press=0.3d0,      ! Pressure (Pa)
+fH=2.0d0,          ! press=kb*300*(fH*H+fH2*H2)
+fH2=2.0d0,         ! press=kb*300*(fH*H+fH2*H2)
+opl=0.315d0,        ! Optical path length (m)
+/
+
+&file_data
+inputfile="/Desktop/CRM_4/exp/Data_20260914_5.txt",                 ! File with the flow data
+n_head=1,          ! Heading reserved lines
+n_conditions=8,    ! Number of conditions to be computed
+n_vars_i=0,        ! Number of integer data columns
+n_vars_r=9,       ! Number of real data columns
+n_vars_c=0,        ! Number of character data columns
+/
+
+! Here we describe what is the column (c) in the flow data file with the specified quantity (q)
+! xind(q)=c
+! nB=n_Balmer,nC=n_Cslines,nL=nB+1+nC
+! 1-->nB: Brilliances for the Balmer lines
+! nB+1: Fulcher band
+! nB+2-->nL: Brilliances for the Cs lines
+! nL+1-->nL+9: TH,Te,Tvib,THm,Trot1,Trot2,beta(0),beta(1),TCs
+! nL+10-->nL+18: H,Hp,e,H2p,H3p,Hm,H2,Cs,Csp
+! nL+19-->nL+20: pressure, opl
+&col_data
+xind(16)=2,                      ! ne
+xind(6)=3,                      ! Te
+xind(14)=4,                     ! nH
+xind(20)=5,                     ! nH2
+xind(15)=6,                     ! nHp
+xind(17)=7,                     ! nH2p
+xind(18)=8,                     ! nH3p
+xind(19)=9,                     ! nHm
+/
+
+&chem_H
+l_eiae=.TRUE.,     ! Electron impact atom excitation: e+H(n)-->e+H(m)
+l_eiai=.TRUE.,     ! Electron impact atom ionization: e+H(n)-->2e+Hp
+l_ase=.TRUE.,      ! Atom spontaneous emission: H(n)-->H(m)+hv
+l_eHp_rr=.TRUE.,   ! Radiative recombination: e+Hp-->H(n)+hv 
+l_eH2p_de=.TRUE.,  ! Dissociative excitation: e+H2p-->e+Hp+H(2)
+l_eH2p_dr=.TRUE.,  ! Dissociative recombination: e+H2p-->H(1)+H(n)
+l_eH3p_dr=.TRUE.,  ! Dissociative recombination: e+H3p-->H2(X)+H(2)
+l_Hp_mn=.TRUE.,    ! Mutual neutralization: Hp+Hm-->H(1)+H(2,3)
+l_H2p_mn=.TRUE.,   ! Mutual neutralization: H2p+Hm-->H2(X)+H(n=2-8)
+l_eH2_de=.TRUE.,   ! Dissociative excitation: e+H2(X)-->e+H(1)+H(n)
+l_HHexc=.TRUE.,    ! Atom-impact excitation: H(1) + H(n) --> H(1) + H(m)
+l_HHion=.TRUE.,    ! Atom-impact ionization: H(1) + H(n) --> H(1) + Hp + e
+ADASdir="/Desktop/CRM_4/data/H/",                         ! ADAS data directory
+k_eiae=11,         ! Choose EIAE cross sections 1: (Johnson, 1972), 2: (Vriens, 1980), 10: (Anderson, 2002), 20: (Przybilla, 2004)
+lEer=.FALSE.,      ! Choose between T:(Eerden, 1995) and F:(Sartori, 2022) - Yacora : T - CR Bari : F
+/
+
+&chem_H2
+chemoldir="/Desktop/CRM_4/data/H2/",                      ! chem_H2 data directory
+/
+
+&chem_Cs
+l_ei_exc=.TRUE.,        ! Electron impact atom excitation: e+Cs(n)-->e+Cs(m)
+l_ei_deexc=.TRUE.,      ! Electron impact atom de-excitation: e+Cs(m)-->e+Cs(n)
+l_ase_Cs=.TRUE.,        ! Spontaneous emission Cs(n) --> hv + Cs(m)
+l_ai_exc=.TRUE.,        ! H atom impact atom excitation: H+Cs(n)-->H+Cs(m)
+l_ai_deexc=.TRUE.,      ! H atom impact atom de-excitation: H+Cs(m)-->H+Cs(n)
+l_ei_ioniz=.TRUE.,      ! Electron impact atom ionization: e+Cs(n)-->2e+Csp
+l_ai_ioniz=.TRUE.,      ! H atom impact atom ionization: H+Cs(n)-->Hm+Csp
+l_ii_mutneut=.TRUE.,    ! H- ion impact ion neutralization: Hm+Csp-->H+Cs(n)
+l_ei_radr=.TRUE.,       ! Electron impact radiative recombination: e+Csp-->Cs(n) + ph
+DATAdir="/Desktop/CRM_4/data/Cs/",                        ! Data directory
+/
+
+&kin_H
+kstart=3,          ! Starting condition for the unknowns. 1: Zero; 2: Boltzmann with H(1) @ Te; 3: Saha with (e,Hp) @ Te
+lph=.TRUE.,        ! Emission as photon flux (T) or energy flux (F)
+lsr=.FALSE.,       ! Emission per steradian (T) or integrated over solid angle (F)
+rtoll=1.0d-7,      ! Relative tolerance for ODE convergence
+atoll=1.0d-16,     ! Absolute tolerance for ODE convergence. For populations smaller than atoll*H(1), tolerance is not enforced
+/
+
+&esc_data
+l_escape=.FALSE.,
+r0=1.25d-1,        ! [m]
+h0_r0=1.0d-1,
+rP_r0=0.0d0,
+cu=0.0d0,
+/
+
+&kin_H2
+range(1)=6.0d2,    ! Range of the Fulcher band (nm)
+range(2)=6.4d2,
+lph=.TRUE.,        ! Emission as photon flux (T) or energy flux (F)
+lsr=.FALSE.,       ! Emission per steradian (T) or integrated over solid angle (F)
+/
+
+&kin_Cs
+lph=.TRUE.,        ! Emission as photon flux (T) or energy flux (F)
+lsr=.FALSE.,       ! Emission per steradian (T) or integrated over solid angle (F)
+rtoll=1.0d-7,      ! Relative tolerance for ODE convergence
+atoll=1.0d-16,     ! Absolute tolerance for ODE convergence. For populations smaller than atoll*Cs(1), tolerance is not enforced
+/
+
+! Define the decision space and the objectives of the optimiser
+! Simple objectives are as follows (nL=n_Balmer+1+n_Cslines):
+! (1:Ha),(2:Hb),(3:Hg),(4:Fulcher),(5-nL:Cs lines)
+! kobj(i)=i*nL+j: the objective is the line ratio (i/j)
+&simplex_data
+npar=0,            ! Dimension of decision space (set to 0 for no fitting)
+toll=1.0d-2,       ! Convergence tolerance
+acc=1.0d-5,        ! Accuracy
+obj0(1)="Ha",      ! Simple objective name (*10)
+obj0(2)="Hb",
+obj0(3)="Hg",
+obj0(4)="Fulcher",
+nobj=4,            ! Dimension of objective space (set to 0 for no error estimation; max: nL)
+kobj(1)=1,
+kobj(2)=2,
+kobj(3)=3,
+kobj(4)=4,
+/
+
+&random_data
+seed=-1,           ! Random number generator seed
+/
+
+! Decision parameters to be optimised
+&retrieve_data
+lfit(1)=.FALSE.,    ! TH (K)
+lim(1,1)=1.0d0,
+lim(2,1)=6.0d0,
+scale(1)=1.0d0,
+!
+lfit(2)=.FALSE.,   ! Te (eV)
+lim(1,2)=1.0d0,
+lim(2,2)=1.5d1,
+scale(2)=1.0d0,
+!
+lfit(3)=.FALSE.,   ! Tvib (K)
+lim(1,3)=1.0d0,
+lim(2,3)=1.0d1,
+scale(3)=1.0d3,
+!
+lfit(4)=.FALSE.,   ! TH- (K)
+lim(1,4)=1.0d0,
+lim(2,4)=1.0d1,
+scale(4)=1.0d3,
+!
+lfit(5)=.FALSE.,   ! Trot1 (K)
+lim(1,5)=1.0d0,
+lim(2,5)=1.0d1,
+scale(5)=1.0d3,
+!
+lfit(6)=.FALSE.,   ! Trot2 (K)
+lim(1,6)=1.0d0,
+lim(2,6)=1.0d1,
+scale(6)=1.0d3,
+!
+lfit(7)=.FALSE.,   ! beta(0)
+lim(1,7)=0.0d0,
+lim(2,7)=1.0d0,
+scale(7)=1.0d0,
+!
+lfit(8)=.FALSE.,   ! beta(1)
+lim(1,8)=0.0d0,
+lim(2,8)=1.0d1,
+scale(8)=1.0d0,
+!
+lfit(9)=.FALSE.,   ! TCs (K)
+lim(1,9)=0.0d0,
+lim(2,9)=1.0d1,
+scale(9)=1.0d0,
+!
+lfit(10)=.FALSE.,   ! H [m^-3] or H/H2
+lim(1,10)=0.0d0,
+lim(2,10)=0.5d0,
+scale(10)=1.0d0,
+!
+lfit(11)=.FALSE.,   ! H+ [m^-3] or H+/(ne+H-)
+lim(1,11)=0.0d0,
+lim(2,11)=0.5d0,
+scale(11)=1.0d0,
+!
+lfit(12)=.FALSE.,   ! e- [m^-3]
+lim(1,12)=8.0d0,
+lim(2,12)=1.2d1,
+scale(12)=1.0d17,
+!
+lfit(13)=.FALSE.,   ! H2+ [m^-3] or  (H+ + H2+)/(ne+H-)
+lim(1,13)=0.5d0,
+lim(2,13)=1.0d0,
+scale(13)=1.0d0,
+!
+lfit(14)=.FALSE.,  ! H- [m^-3]
+lim(1,14)=0.0d0,
+lim(2,14)=5.0d0,
+scale(14)=1.0d16,
+!
+lfit(15)=.FALSE.,   ! H2 [m^-3]
+lim(1,15)=1.8d0,
+lim(2,15)=4.1d0,
+scale(15)=1.0d19,
+!
+lfit(16)=.FALSE.,  ! Cs [m^-3]
+lim(1,16)=8.0d0,
+lim(2,16)=1.2d1,
+scale(16)=1.0d13,
+!
+lfit(17)=.FALSE.,  ! Cs+ [m^-3] or Cs+/Cs
+lim(1,17)=1.5d0,
+lim(2,17)=2.5d0,
+scale(17)=1.0d0,
+!
+lfit(18)=.FALSE.,  ! pressione [Pa]
+lim(1,18)=0.430d0,
+lim(2,18)=0.431d0,
+scale(18)=1.0d0,
+!
+lfit(19)=.FALSE.,  ! Optical path length [m]
+lim(1,19)=5.0d-1,
+lim(2,19)=8.5d-1,
+scale(19)=1.0d0,
+!
+/
+
+&loop_data
+nloops=1,          ! number of runs
+/
+
+
+

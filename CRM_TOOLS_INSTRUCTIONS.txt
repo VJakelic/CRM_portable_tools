@@ -1,0 +1,214 @@
+CRM AUTOFITTER + PLOT/CHECK TOOL
+================================
+
+  crm_autofit.py      --> autofitter
+  crm_plot_check.py   --> runs one CRM input, makes plots, and calculates OES errors, saves this in quick_checks
+
+LOCATION
+--------------------
+Put both scripts in a tools/ folder directly inside the CRM root, for example:
+
+  CRM_ROOT/
+    bin/CRM
+    input/input_nofit.txt
+    exp/
+    tools/
+      crm_autofit.py
+      crm_plot_check.py
+
+If the scripts are placed there, they normally detect CRM_ROOT automatically.
+Otherwise either pass:
+
+  --crm-root /path/to/CRM_ROOT
+
+or set the environment variable CRM_ROOT.
+
+The default CRM layout is:
+  executable:  bin/CRM
+  config:      input/input_nofit.txt
+  data folder: exp/
+  CRM output:  CRM_res_<run-name>.txt
+
+The executable, config, active input, CRM output and results locations can be
+overridden from the command line. Run either script with --help for all options.
+
+
+PYTHON REQUIREMENTS!
+-------------------
+Python 3 plus:
+
+  numpy
+  pandas
+  matplotlib   (needed by crm_plot_check.py)
+
+Install if necessary with:
+
+  python3 -m pip install numpy pandas matplotlib
+
+
+FILES YOU SUPPLY FOR A RUN
+--------------------------
+1. A CRM input/template file with columns:
+
+   PID ne Te nH nH2 nHp nH2p nH3p nHm
+
+2. A PID-distance map. Whitespace or CSV is accepted. Recommended format:
+
+   PID distance_cm
+   1   0.0
+   2   2.5
+   3   5.0
+   4   7.5
+   .   .
+   .   .
+   .   .
+
+   distance_cm is the physical coordinate used for profile interpolation and
+   OES integration. PID numbers do not need to be equally spaced, and their
+   numeric order does not need to match the spatial order.
+
+3. Experimental OES targets, either directly on the command line or in a file:
+
+   Ha-s       1.0e20
+   Hb-s       2.0e19
+   Hg-s       5.0e18
+   Fulcher-s  3.0e19
+
+   These numbers are only formatting examples. Use your own measurements.
+
+IMPORTANT: the OES targets must represent the same physical measurement and
+normalization that you intend to compare with the CRM profile integral.
+
+
+IMPORTANT: THE CRM WORKING INPUT
+--------------------------------
+The CRM configuration expects to read a particular data/input file as a working file. Tell the
+scripts which file that is using --active-input. Example:
+
+  --active-input exp/working_input.txt
+
+This path can be absolute or relative to CRM_ROOT.
+
+crm_autofit.py overwrites this WORKING file repeatedly while evaluating
+candidates. The starting template must be a different file. The fitter
+will refuse to run if the template and active-input paths are the same.
+
+The final best fit is written to a separate file; the starting template is not
+overwritten.
+
+crm_plot_check.py temporarily uses the workinf input and restores the previous
+working input, config and CRM output after the run. It also works if the source
+input is already the configured active-input file
+
+
+AUTOFITTER BASIC USE
+---------------------
+Example, when the scripts are in CRM_ROOT/tools/:
+
+  python3 tools/crm_autofit.py exp/start_profile.txt \
+      --active-input exp/working_input.txt \
+      --distance-map pid_distances.txt \
+      --targets-file oes_targets.txt \
+      --control-pids 1,2,4 \
+      --require-cs 11 \
+      --run-name fit1
+
+The control PIDs are ordered internally by distance_cm, not by PID number.
+They must include both spatial endpoint PIDs of the template so the fitted
+neutral profiles do not require extrapolation.
+
+The final best input is written beside the template as:
+
+  start_profile_best.txt
+
+Use --best-output to choose another name/location. It must differ from both the
+starting template and the active working input.
+
+The fitter creates diagnostics/history under:
+
+  CRM_ROOT/crm_autofit_runs/
+
+Use --results-root to change it.
+
+--runtime-minutes is the optimization budget. The exact final verification adds
+one additional CRM run so that the saved solution is checked from disk.
+
+The driver PID defaults to the fitted template PID with the largest distance_cm.
+Override it with --driver-pid if the physical driver is elsewhere. The driver
+prior uses physical distance, so the coordinate may increase or decrease in any
+PID-number order.
+
+The fitter keeps ne, Te and nHm from the template fixed. It fits nH and nH2 and
+the H+/H2+ positive-ion composition. nH3p is fixed to zero in this fitter.
+
+PLOT/CHECK TOOL BASIC USE
+--------------------------
+
+  python3 tools/crm_plot_check.py exp/profile_to_check.txt \
+      --active-input exp/working_input.txt \
+      --distance-map pid_distances.txt \
+      --targets-file oes_targets.txt \
+      --cs 11 \
+      --run-name check1
+
+Results are saved under:
+
+  CRM_ROOT/crm_quick_checks/<input-file-name>/
+
+The checker produces input/profile plots, CRM output plots, OES volumetric
+emissivity, relative-error plots, CSV files, and a text summary.
+
+--cs temporarily changes k_eiae for that check and restores the config after the
+run. If --cs is omitted, the currently active k_eiae setting is used. The config
+must contain exactly one active k_eiae setting from 11, 12, 21 or 22.
+
+The checker requires the CRM output to contain every PID from the input exactly
+once before it performs the OES integral. It will not silently integrate an
+incomplete PID subset.
+
+
+INLINE OES TARGETS
+------------------
+Instead of --targets-file, both scripts accept four values in this order:
+
+  --targets Ha Hb Hg Fulcher
+
+For example:
+
+  --targets 1.0e20 2.0e19 5.0e18 3.0e19
+
+Targets must be finite and greater than zero.
+
+
+NON-STANDARD CRM PATHS
+----------------------
+The structural defaults can be changed without editing either script:
+
+  --config path/to/config.txt
+  --executable path/to/CRM
+  --crm-output path/to/output.txt
+  --crm-root path/to/CRM_ROOT
+
+Relative --config, --executable, --active-input and results/output-root paths
+are resolved relative to CRM_ROOT.
+
+
+OES CALCULATION USED BY BOTH SCRIPTS
+------------------------------------
+Relative error is:
+
+  (calculated - experimental) / experimental
+
+so negative values mean underprediction and positive values mean overprediction.
+
+
+SAFETY / REPRODUCIBILITY NOTES
+------------------------------
+- The fitter hashes the starting template, CRM config and CRM executable before
+  reusing cached evaluations. If any of them changes, old cached CRM results are
+  not reused.
+- The checker backs up and restores the CRM working state even when a run raises
+  a normal Python exception or is interrupted with Ctrl+C.
+- IMPORTANT: A forced process kill (for example kill -9 or power loss) cannot run Python's
+  cleanup code; in that case inspect the active input/config/output manually. 
+- REPRODUCIBILITY: check your base CRM settings, these are not touched by the scripts

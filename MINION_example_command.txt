@@ -1,0 +1,49 @@
+MINION example command
+======================
+
+placement:
+
+CRM_4/
+  crm_autofit.py
+  crm_plot_check.py
+  pid_distances_MINION_example.txt
+  oes_targets_MINION_example.txt
+  exp/
+    MINION_template_example.txt
+    Data_20260914_5.txt          <-- personal default, can literally be a copy of the example template
+  input/
+    input_nofit.txt              <-- existing CRM config
+  bin/
+    CRM                          <-- existing CRM executable
+
+Run from inside CRM_4:
+
+python3 crm_autofit.py \
+    exp/MINION_template_example.txt \
+    --active-input exp/Data_20260914_5.txt \
+    --distance-map pid_distances_MINION_example.txt \
+    --targets-file oes_targets_MINION_example.txt \
+    --control-pids 6,8,10,12,13 \
+    --driver-pid 13 \
+    --require-cs 11
+
+The following MINION values are already the script defaults and therefore
+do not need to be written on the command line unless you want to change them:
+
+  OES weights:
+    Ha-s      1.2
+    Hb-s      1.0
+    Hg-s      1.0
+    Fulcher-s 0.4
+
+  nH/nH2 bounds:          0.10 to 0.50
+  nH2 density bounds:     2.0E19 to 5.0E19 m^-3
+  (nHp+nH2p)/ne bounds:   0.99 to 1.01
+  H+ fraction bounds:     0.02 to 0.98
+  relative-error tolerance: 0.12 (= 12%)
+  driver concentration weight: 0.20
+
+The fitter writes the final result to:
+  exp/MINION_template_example_best.txt
+
+unless --best-output is supplied.
