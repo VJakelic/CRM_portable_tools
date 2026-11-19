@@ -1033,6 +1033,8 @@ def run_crm(respect_deadline=True):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
+        encoding="latin-1",
+        errors="replace",
     )
 
     try:
