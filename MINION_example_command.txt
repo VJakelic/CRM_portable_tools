@@ -10,7 +10,7 @@ CRM_4/
   oes_targets_MINION_example.txt
   exp/
     MINION_template_example.txt
-    Data_20260914_5.txt          <-- personal default, can literally be a copy of the example template
+    Data_20260914_5.txt          <-- personal default, can literally be a copy of the example template (just rename the copy)
   input/
     input_nofit.txt              <-- existing CRM config
   bin/
