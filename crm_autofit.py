@@ -2,6 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
+Portable hybrid global + multi-start local fitter for the CRM hydrogen model.
+
+The numerical optimization is the same style as the original research script,
+but machine-specific paths, filenames, run names, OES targets and PID-distance
+mapping are supplied at runtime instead of being embedded in the source.
+
 CRM layout convention
 ---------------------
 By default the script expects the CRM root to contain:
@@ -15,7 +21,7 @@ is assumed to follow the standard name CRM_res_<run-name>.txt unless
 --crm-output is supplied.
 
 The fitter keeps ne, Te and nHm from the template fixed. It fits nH, nH2, H+
-and H2+ under the configured physical bounds; H3+ is fixed to zero
+and H2+ under the configured physical bounds; H3+ is fixed to zero.
 
 Use ``python3 crm_autofit.py --help`` for all options.
 """
@@ -35,6 +41,8 @@ import pandas as pd
 # ============================================================================
 # DEFAULT NUMERICAL SETTINGS
 # ============================================================================
+# These are algorithm/physics defaults, not machine-specific paths. Most can
+# be overridden from the command line.
 
 MAX_RUNTIME_MINUTES = 165.0
 GLOBAL_TIME_FRACTION = 0.45
@@ -82,6 +90,7 @@ TEMPLATE_FILE = None
 CRM_INPUT_FILE = None
 CRM_EXECUTABLE = None
 CRM_CONFIG = None
+CRM_RUNTIME_CONFIG = None
 CRM_RUN_NAME = None
 CRM_OUTPUT_FILE = None
 RESULTS_ROOT = None
@@ -174,14 +183,110 @@ def resolve_root_path(value, crm_root):
     return os.path.abspath(os.path.join(crm_root, value))
 
 
+
+def _fortran_quote_path(path, trailing_slash=False):
+    """Render a filesystem path as a quoted Fortran namelist string."""
+    value = os.path.abspath(os.path.expanduser(path))
+    if trailing_slash and not value.endswith(os.sep):
+        value += os.sep
+    return '"{}"'.format(value.replace('"', '""'))
+
+
+def _replace_namelist_value(lines, section, key, rendered_value):
+    """
+    Replace exactly one active key=value assignment inside a Fortran namelist
+    section. Commented lines are ignored.
+    """
+    section_lower = section.strip().lower()
+    key_lower = key.strip().lower()
+    active_section = None
+    matches = []
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("&"):
+            active_section = stripped[1:].split()[0].lower()
+            continue
+        if stripped == "/":
+            active_section = None
+            continue
+        if active_section != section_lower:
+            continue
+        if not stripped or stripped.startswith(("!", "#", ";")):
+            continue
+
+        m = re.match(r"^(\s*" + re.escape(key) + r"\s*=\s*)([^,!\n]*)(.*)$",
+                     line, flags=re.IGNORECASE)
+        if m:
+            matches.append((i, m))
+
+    if len(matches) != 1:
+        raise RuntimeError(
+            "Expected exactly one active {}.{} assignment in CRM config; found {}."
+            .format(section, key, len(matches))
+        )
+
+    i, m = matches[0]
+    newline = "\n" if lines[i].endswith("\n") else ""
+    suffix = m.group(3).rstrip("\r\n")
+    lines[i] = "{}{}{}{}".format(m.group(1), rendered_value, suffix, newline)
+
+
+def write_runtime_config(source_config, destination, active_input,
+                         n_conditions, cs_setting, crm_root):
+    """
+    Create a run-specific CRM config without modifying the user's original.
+
+    CLI/runtime values become authoritative for:
+      * file_data.inputfile       <- --active-input
+      * file_data.n_conditions    <- number of rows in the template/input
+      * chem_H.k_eiae             <- --require-cs if supplied, otherwise current config
+      * CRM data directories      <- --crm-root/data/...
+    """
+    with open(source_config, "r") as f:
+        lines = f.readlines()
+
+    data_h = os.path.join(crm_root, "data", "H")
+    data_h2 = os.path.join(crm_root, "data", "H2")
+    data_cs = os.path.join(crm_root, "data", "Cs")
+
+    replacements = [
+        ("thermo_H",  "qdir",         _fortran_quote_path(data_h, True)),
+        ("thermo_H2", "levdir",       _fortran_quote_path(data_h2, True)),
+        ("file_data", "inputfile",    _fortran_quote_path(active_input, False)),
+        ("file_data", "n_conditions", str(int(n_conditions))),
+        ("chem_H",    "ADASdir",      _fortran_quote_path(data_h, True)),
+        ("chem_H",    "k_eiae",       str(int(cs_setting))),
+        ("chem_H2",   "chemoldir",    _fortran_quote_path(data_h2, True)),
+        ("chem_Cs",   "DATAdir",      _fortran_quote_path(data_cs, True)),
+    ]
+
+    for section, key, value in replacements:
+        _replace_namelist_value(lines, section, key, value)
+
+    parent = os.path.dirname(destination)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent)
+
+    with open(destination, "w") as f:
+        f.writelines(lines)
+
+
 def load_distance_map(path):
     """Read a whitespace- or CSV-delimited two-column PID/distance map."""
     path = os.path.abspath(os.path.expanduser(path))
     ensure_exists(path, "PID-distance map")
 
-    # First try named columns.
+    # First try a header-aware whitespace/comma parser. This correctly accepts
+    # the distributed example line: "PID distance_cm".
     try:
-        df = pd.read_csv(path, sep=None, engine="python", comment="#")
+        df = pd.read_csv(
+            path,
+            sep=r"[\s,]+",
+            engine="python",
+            comment="#",
+            header=0,
+        )
         lower = {str(c).strip().lower(): c for c in df.columns}
         if "pid" in lower and "distance_cm" in lower:
             pid_col = lower["pid"]
@@ -199,6 +304,11 @@ def load_distance_map(path):
             header=None,
             names=["PID", "distance_cm"],
         )
+        # If a textual header survived the fallback, drop it explicitly.
+        first_pid = str(out.iloc[0]["PID"]).strip().lower() if len(out) else ""
+        first_dist = str(out.iloc[0]["distance_cm"]).strip().lower() if len(out) else ""
+        if first_pid == "pid" and first_dist == "distance_cm":
+            out = out.iloc[1:].reset_index(drop=True)
 
     out = out.dropna(how="all")
     out["PID"] = pd.to_numeric(out["PID"], errors="raise").astype(int)
@@ -278,20 +388,21 @@ def parse_args():
     parser.add_argument(
         "--run-name",
         default="autofit",
-        help="Run name passed to CRM. Default is autofit.",
+        help="Run name passed to CRM. Default: autofit.",
     )
     parser.add_argument(
         "--crm-output",
         default=None,
         help=(
-            "CRM output file. Default is <crm-root>/CRM_res_<run-name>.txt."
+            "CRM output file. Default: <crm-root>/CRM_res_<run-name>.txt."
         ),
     )
     parser.add_argument(
         "--best-output",
         default=None,
         help=(
-            "Where to write the final best input. Default TEMPLATE_best.txt beside the template."
+            "Where to write the final best input. Default: TEMPLATE_best.txt "
+            "beside the template."
         ),
     )
     parser.add_argument(
@@ -324,7 +435,7 @@ def parse_args():
         type=float,
         metavar=("HA", "HB", "HG", "FULCHER"),
         default=None,
-        help="Optional spectral weights. Default 1.2 1.0 1.0 0.4.",
+        help="Optional spectral weights. Default: 1.2 1.0 1.0 0.4.",
     )
     parser.add_argument(
         "--control-pids",
@@ -351,7 +462,7 @@ def parse_args():
         "--runtime-minutes",
         type=float,
         default=MAX_RUNTIME_MINUTES,
-        help="Optimization wall-clock budget, final verification adds one CRM run.",
+        help="Optimization wall-clock budget; final verification adds one CRM run.",
     )
     parser.add_argument(
         "--global-time-fraction",
@@ -417,6 +528,7 @@ def configure_from_args(args):
     global NH2_CONTROL_BOUNDS, ION_TOTAL_OVER_NE_BOUNDS, HP_FRACTION_BOUNDS
     global N_CONTROL, N_PARAMS, LOWER_BOUNDS, UPPER_BOUNDS, PARAM_RANGES
     global OBJECTIVE_VERSION
+    global CRM_RUNTIME_CONFIG
 
     CRM_ROOT = discover_crm_root(args.crm_root)
     EXP_DIR = os.path.join(CRM_ROOT, "exp")
@@ -1028,7 +1140,7 @@ def run_crm(respect_deadline=True):
     t0 = time.time()
 
     process = subprocess.Popen(
-        [CRM_EXECUTABLE, CRM_CONFIG, CRM_RUN_NAME],
+        [CRM_EXECUTABLE, (CRM_RUNTIME_CONFIG or CRM_CONFIG), CRM_RUN_NAME],
         cwd=CRM_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -1168,6 +1280,7 @@ def read_integrals():
 
         emissivity = crm_line_signal / opl
 
+        # Keep reconstructed volumetric emissivity in the diagnostic dataframe.
         df[line + "_vol"] = emissivity
 
         values[line] = float(
@@ -1404,7 +1517,7 @@ def all_lines_within_tolerance(errors):
 
 def smoothness_tiebreak(params):
     """
-    Secondary metric only. It is not part of the OES objective.
+    Secondary metric only. It is deliberately NOT part of the OES objective.
     Smaller means smoother neutral-control profiles.
     """
     p = clip_params(params)
@@ -2054,7 +2167,8 @@ def run_global_search(initial, rng):
 
     generation = 0
 
-    # Use remaining global budget to mutate around the best candidates while continuing to inject fully random points.
+    # Use remaining global budget to mutate around the best candidates while
+    # continuing to inject fully random points.
     while (
         time.time() < GLOBAL_DEADLINE
         and not deadline_reached()
@@ -2073,7 +2187,7 @@ def run_global_search(initial, rng):
             )
         ]
 
-        # Slowly narrow the mutation width while never making it too small.
+        # Slowly narrow the mutation width while never making it tiny.
         sigma = max(
             0.06,
             GLOBAL_MUTATION_SIGMA
@@ -3085,26 +3199,39 @@ def main():
         TEMPLATE_FILE
     )
 
+    # The CLI is authoritative. --require-cs now means "use this setting for
+    # this run" rather than merely rejecting a config with a different value.
+    configured_cs = detect_cross_section_setting()
+    CS_SETTING = (
+        int(REQUIRE_CS_SETTING)
+        if REQUIRE_CS_SETTING is not None
+        else int(configured_cs)
+    )
+
+    if not os.path.isdir(RESULTS_ROOT):
+        os.makedirs(RESULTS_ROOT)
+
+    CRM_RUNTIME_CONFIG = os.path.join(
+        RESULTS_ROOT,
+        ".crm_autofit_runtime_input_nofit_{}.txt".format(os.getpid())
+    )
+
+    write_runtime_config(
+        CRM_CONFIG,
+        CRM_RUNTIME_CONFIG,
+        CRM_INPUT_FILE,
+        len(TEMPLATE),
+        CS_SETTING,
+        CRM_ROOT,
+    )
+
     CONFIG_SHA256 = file_sha256(
-        CRM_CONFIG
+        CRM_RUNTIME_CONFIG
     )
 
     EXECUTABLE_SHA256 = file_sha256(
         CRM_EXECUTABLE
     )
-
-    CS_SETTING = detect_cross_section_setting()
-
-    if (
-        REQUIRE_CS_SETTING is not None
-        and CS_SETTING != REQUIRE_CS_SETTING
-    ):
-        raise RuntimeError(
-            "This run requires k_eiae={}, but current config has k_eiae={}.".format(
-                REQUIRE_CS_SETTING,
-                CS_SETTING
-            )
-        )
 
     timestamp = time.strftime(
         "%Y%m%d_%H%M%S"
@@ -3134,15 +3261,19 @@ def main():
     )
 
     safe_copy(
+        CRM_RUNTIME_CONFIG,
+        os.path.join(
+            RUN_DIR,
+            "input_nofit_runtime_snapshot.txt"
+        )
+    )
+    safe_copy(
         CRM_CONFIG,
         os.path.join(
             RUN_DIR,
-            "input_nofit_snapshot.txt"
+            "input_nofit_original_snapshot.txt"
         )
     )
-
-    if not os.path.isdir(RESULTS_ROOT):
-        os.makedirs(RESULTS_ROOT)
 
     HISTORY_FILE = os.path.join(
         RESULTS_ROOT,
@@ -3175,9 +3306,17 @@ def main():
     )
 
     print(
-        "k_eiae={}".format(
+        "k_eiae={} (temporary runtime override; original config unchanged)".format(
             CS_SETTING
         ),
+        flush=True
+    )
+    print(
+        "CRM runtime inputfile: {}".format(CRM_INPUT_FILE),
+        flush=True
+    )
+    print(
+        "CRM n_conditions: {}".format(len(TEMPLATE)),
         flush=True
     )
 
@@ -3365,7 +3504,7 @@ def main():
         best_seen
     )
 
-    # The final fresh rerun is authoritative!!
+    # The final fresh rerun is authoritative.
     maybe_update_best(
         final_verified
     )
@@ -3501,7 +3640,8 @@ def main():
     )
 
     print(
-        "\nReminder: this is the best fit found by the hybrid search, not a formal proof of the global optimum.",
+        "\nReminder: this is the best fit found by the hybrid search, "
+        "not a formal proof of the global optimum.",
         flush=True
     )
 
