@@ -10,7 +10,7 @@ CRM_4/
   oes_targets_MINION_example.txt
   exp/
     MINION_template_example.txt
-    Data_20260914_5.txt          <-- personal default, can literally be a copy of the example template (just rename the copy)
+    Data_20260914_5.txt          <-- do not change this name
   input/
     input_nofit.txt              <-- existing CRM config
   bin/
@@ -26,6 +26,9 @@ python3 crm_autofit.py \
     --control-pids 6,8,10,12,13 \
     --driver-pid 13 \
     --require-cs 11
+
+If needed, modify the file paths in input_nofit.txt to follow your personal
+file architecture (the script will let you know if this is the case)
 
 The following MINION values are already the script defaults and therefore
 do not need to be written on the command line unless you want to change them:
