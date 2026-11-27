@@ -21,9 +21,12 @@ is assumed to follow the standard name CRM_res_<run-name>.txt unless
 --crm-output is supplied.
 
 The fitter keeps ne, Te and nHm from the template fixed. It fits nH, nH2, H+
-and H2+ under the configured physical bounds; H3+ is fixed to zero.
+and H2+ and H3+ fractions around 60/20/20 under exact hydrogen charge balance.
 
-Use ``python3 crm_autofit.py --help`` for all options.
+Namelist data/input paths default to HOME-relative paths beginning with /,
+matching the RFX Fortran CRM. Use --crm-path-mode absolute for other builds.
+
+Use ``python3 crm_autofit_60_20_20_FIXED.py --help`` for all options.
 """
 
 import argparse
@@ -69,8 +72,8 @@ FAILED_ITERATIONS_BEFORE_ESCAPE = 2
 
 FD_RATIO_STEP = 0.025
 FD_NH2_1E19_STEP = 0.18
-FD_ION_RATIO_STEP = 0.025
-FD_HP_FRACTION_STEP = 0.04
+FD_HP_FRACTION_STEP = 0.005
+FD_H2_SPLIT_STEP = 0.05
 
 STOP_ON_TOLERANCE = False
 REUSE_HASH_COMPATIBLE_HISTORY = True
@@ -112,8 +115,10 @@ DISSOCIATION_RATIO_BOUNDS = (0.10, 0.50)
 NH2_DENSITY_BOUNDS_M3 = (2.0e19, 5.0e19)
 NH2_UNIT = 1.0e19
 NH2_CONTROL_BOUNDS = None
-ION_TOTAL_OVER_NE_BOUNDS = (0.99, 1.01)
-HP_FRACTION_BOUNDS = (0.02, 0.98)
+ION_FRACTION_TOL = 0.05
+ION_TARGET = np.array([0.60, 0.20, 0.20])
+# CRM output is often rounded to four significant figures.
+CRM_DENSITY_RTOL = 0.003
 
 N_CONTROL = 0
 N_PARAMS = 0
@@ -184,9 +189,21 @@ def resolve_root_path(value, crm_root):
 
 
 
-def _fortran_quote_path(path, trailing_slash=False):
-    """Render a filesystem path as a quoted Fortran namelist string."""
+def _fortran_quote_path(path, trailing_slash=False, path_mode="home-relative"):
+    """Render a namelist path for the CRM's own path-resolution convention.
+
+    The RFX CRM prepends HOME to configured paths, including those beginning
+    with '/'. For example, /Desktop/CRM_4/data/H2/ is relative to HOME.
+    Other CRM builds that accept absolute paths can use --crm-path-mode absolute.
+    Python's filesystem paths and the config filename passed to CRM remain absolute.
+    """
     value = os.path.abspath(os.path.expanduser(path))
+    if path_mode == "home-relative":
+        home = os.path.abspath(os.path.expanduser("~"))
+        relative = os.path.relpath(value, home)
+        value = os.sep + relative if relative != "." else os.sep
+    elif path_mode != "absolute":
+        raise ValueError("Unsupported CRM path mode: {}".format(path_mode))
     if trailing_slash and not value.endswith(os.sep):
         value += os.sep
     return '"{}"'.format(value.replace('"', '""'))
@@ -233,7 +250,8 @@ def _replace_namelist_value(lines, section, key, rendered_value):
 
 
 def write_runtime_config(source_config, destination, active_input,
-                         n_conditions, cs_setting, crm_root):
+                         n_conditions, cs_setting, crm_root,
+                         path_mode="home-relative"):
     """
     Create a run-specific CRM config without modifying the user's original.
 
@@ -251,14 +269,16 @@ def write_runtime_config(source_config, destination, active_input,
     data_cs = os.path.join(crm_root, "data", "Cs")
 
     replacements = [
-        ("thermo_H",  "qdir",         _fortran_quote_path(data_h, True)),
-        ("thermo_H2", "levdir",       _fortran_quote_path(data_h2, True)),
-        ("file_data", "inputfile",    _fortran_quote_path(active_input, False)),
+        ("thermo_H",  "qdir",         _fortran_quote_path(data_h, True, path_mode)),
+        ("thermo_H2", "levdir",       _fortran_quote_path(data_h2, True, path_mode)),
+        ("file_data", "inputfile",    _fortran_quote_path(active_input, False, path_mode)),
         ("file_data", "n_conditions", str(int(n_conditions))),
-        ("chem_H",    "ADASdir",      _fortran_quote_path(data_h, True)),
+        ("cond_data", "lcond(1)", ".TRUE."),
+        ("cond_data", "lcond(2)", ".TRUE."),
+        ("chem_H",    "ADASdir",      _fortran_quote_path(data_h, True, path_mode)),
         ("chem_H",    "k_eiae",       str(int(cs_setting))),
-        ("chem_H2",   "chemoldir",    _fortran_quote_path(data_h2, True)),
-        ("chem_Cs",   "DATAdir",      _fortran_quote_path(data_cs, True)),
+        ("chem_H2",   "chemoldir",    _fortran_quote_path(data_h2, True, path_mode)),
+        ("chem_Cs",   "DATAdir",      _fortran_quote_path(data_cs, True, path_mode)),
     ]
 
     for section, key, value in replacements:
@@ -368,6 +388,14 @@ def parse_args():
         help="CRM root. Can also be supplied by CRM_ROOT environment variable.",
     )
     parser.add_argument(
+        "--crm-path-mode",
+        choices=("home-relative", "absolute"),
+        default="home-relative",
+        help=("Path convention inside the Fortran config. Default: home-relative "
+              "(CRM prepends HOME). Use absolute only if your CRM build accepts "
+              "full paths without prepending HOME."),
+    )
+    parser.add_argument(
         "--active-input",
         required=True,
         help=(
@@ -401,13 +429,13 @@ def parse_args():
         "--best-output",
         default=None,
         help=(
-            "Where to write the final best input. Default: TEMPLATE_best.txt "
+            "Where to write the final best input. Default: TEMPLATE_best_60_20_20.txt "
             "beside the template."
         ),
     )
     parser.add_argument(
         "--results-root",
-        default="crm_autofit_runs",
+        default="crm_autofit_runs_60_20_20",
         help="Diagnostics/history directory, relative to CRM root unless absolute.",
     )
     parser.add_argument(
@@ -499,20 +527,9 @@ def parse_args():
         help="Bounds for nH2 in m^-3.",
     )
     parser.add_argument(
-        "--ion-bounds",
-        nargs=2,
-        type=float,
-        default=ION_TOTAL_OVER_NE_BOUNDS,
-        metavar=("MIN", "MAX"),
-        help="Bounds for (nH+ + nH2+)/ne. Equal bounds are allowed.",
-    )
-    parser.add_argument(
-        "--hp-fraction-bounds",
-        nargs=2,
-        type=float,
-        default=HP_FRACTION_BOUNDS,
-        metavar=("MIN", "MAX"),
-        help="Bounds for H+ fraction of H+ + H2+.",
+        "--ion-fraction-tolerance", type=float, default=ION_FRACTION_TOL,
+        help="Absolute fractional deviation allowed for each of 60/20/20; "
+             "0.05 permits +/-5 percentage points; 0 fixes the ratio exactly.",
     )
     return parser.parse_args()
 
@@ -525,7 +542,7 @@ def configure_from_args(args):
     global REQUIRE_CS_SETTING, MAX_RUNTIME_MINUTES, GLOBAL_TIME_FRACTION
     global DRIVER_CONCENTRATION_WEIGHT, ACCEPTABLE_RELATIVE_ERROR
     global DISSOCIATION_RATIO_BOUNDS, NH2_DENSITY_BOUNDS_M3
-    global NH2_CONTROL_BOUNDS, ION_TOTAL_OVER_NE_BOUNDS, HP_FRACTION_BOUNDS
+    global NH2_CONTROL_BOUNDS, ION_FRACTION_TOL
     global N_CONTROL, N_PARAMS, LOWER_BOUNDS, UPPER_BOUNDS, PARAM_RANGES
     global OBJECTIVE_VERSION
     global CRM_RUNTIME_CONFIG
@@ -538,7 +555,7 @@ def configure_from_args(args):
         BEST_INPUT_FILE = os.path.abspath(os.path.expanduser(args.best_output))
     else:
         stem, ext = os.path.splitext(TEMPLATE_FILE)
-        BEST_INPUT_FILE = stem + "_best" + (ext or ".txt")
+        BEST_INPUT_FILE = stem + "_best_60_20_20" + (ext or ".txt")
 
     CRM_INPUT_FILE = resolve_root_path(args.active_input, CRM_ROOT)
     CRM_CONFIG = resolve_root_path(args.config, CRM_ROOT)
@@ -632,14 +649,13 @@ def configure_from_args(args):
 
     DISSOCIATION_RATIO_BOUNDS = tuple(float(v) for v in args.ratio_bounds)
     NH2_DENSITY_BOUNDS_M3 = tuple(float(v) for v in args.nh2_bounds)
-    ION_TOTAL_OVER_NE_BOUNDS = tuple(float(v) for v in args.ion_bounds)
-    HP_FRACTION_BOUNDS = tuple(float(v) for v in args.hp_fraction_bounds)
+    ION_FRACTION_TOL = float(args.ion_fraction_tolerance)
+    if not np.isfinite(ION_FRACTION_TOL) or not 0 <= ION_FRACTION_TOL <= 0.20:
+        raise RuntimeError("--ion-fraction-tolerance must be in [0, 0.20].")
 
     for name, bounds in [
         ("ratio", DISSOCIATION_RATIO_BOUNDS),
         ("nH2", NH2_DENSITY_BOUNDS_M3),
-        ("ion", ION_TOTAL_OVER_NE_BOUNDS),
-        ("H+ fraction", HP_FRACTION_BOUNDS),
     ]:
         if not all(np.isfinite(v) for v in bounds):
             raise RuntimeError("{} bounds must be finite: {}".format(name, bounds))
@@ -650,10 +666,6 @@ def configure_from_args(args):
         raise RuntimeError("nH/nH2 ratio bounds must be >= 0.")
     if NH2_DENSITY_BOUNDS_M3[0] <= 0.0:
         raise RuntimeError("nH2 density bounds must be > 0.")
-    if ION_TOTAL_OVER_NE_BOUNDS[0] < 0.0:
-        raise RuntimeError("Positive-ion/electron ratio bounds must be >= 0.")
-    if HP_FRACTION_BOUNDS[0] < 0.0 or HP_FRACTION_BOUNDS[1] > 1.0:
-        raise RuntimeError("H+ fraction bounds must lie within [0, 1].")
 
     NH2_CONTROL_BOUNDS = (
         NH2_DENSITY_BOUNDS_M3[0] / NH2_UNIT,
@@ -665,13 +677,13 @@ def configure_from_args(args):
     LOWER_BOUNDS = np.array(
         [DISSOCIATION_RATIO_BOUNDS[0]] * N_CONTROL
         + [NH2_CONTROL_BOUNDS[0]] * N_CONTROL
-        + [ION_TOTAL_OVER_NE_BOUNDS[0], HP_FRACTION_BOUNDS[0]],
+        + [0.60 - ION_FRACTION_TOL, 0.0 if ION_FRACTION_TOL > 0 else 0.5],
         dtype=float,
     )
     UPPER_BOUNDS = np.array(
         [DISSOCIATION_RATIO_BOUNDS[1]] * N_CONTROL
         + [NH2_CONTROL_BOUNDS[1]] * N_CONTROL
-        + [ION_TOTAL_OVER_NE_BOUNDS[1], HP_FRACTION_BOUNDS[1]],
+        + [0.60 + ION_FRACTION_TOL, 1.0 if ION_FRACTION_TOL > 0 else 0.5],
         dtype=float,
     )
     PARAM_RANGES = UPPER_BOUNDS - LOWER_BOUNDS
@@ -686,8 +698,8 @@ def build_objective_version():
         tuple(int(v) for v in CONTROL_PIDS.tolist()),
         tuple(float(v) for v in DISSOCIATION_RATIO_BOUNDS),
         tuple(float(v) for v in NH2_DENSITY_BOUNDS_M3),
-        tuple(float(v) for v in ION_TOTAL_OVER_NE_BOUNDS),
-        tuple(float(v) for v in HP_FRACTION_BOUNDS),
+        float(ION_FRACTION_TOL),
+        tuple(ION_TARGET.tolist()),
         tuple((line, float(TARGETS[line])) for line in LINE_ORDER),
         tuple((line, float(WEIGHTS[line])) for line in LINE_ORDER),
         int(DRIVER_PID),
@@ -696,7 +708,7 @@ def build_objective_version():
     )).encode("utf-8")
     history_signature = hashlib.sha256(history_signature_payload).hexdigest()[:12]
     return (
-        "opl_corrected_driver_prior_portable_v2_w{:.6g}_cfg{}"
+        "opl_corrected_exact_qn_60_20_20_v1_w{:.6g}_cfg{}"
         .format(DRIVER_CONCENTRATION_WEIGHT, history_signature)
     )
 
@@ -792,6 +804,8 @@ def load_template(path):
                 "Template column {} contains non-finite values.".format(col)
             )
 
+    if np.any(df["ne"].values <= 0) or np.any(df["nHm"].values < 0):
+        raise RuntimeError("Template requires ne > 0 and nHm >= 0.")
     pids = sorted(df["PID"].tolist())
     if len(pids) < 2 or len(set(pids)) != len(pids):
         raise RuntimeError("Template must contain at least two unique PID rows.")
@@ -881,14 +895,24 @@ def interpolate_controls(template, controls):
     )
 
 
+def ion_fractions(params):
+    """Map two bounded controls onto the feasible three-fraction simplex."""
+    p = clip_params(params)
+    hp = float(p[2 * N_CONTROL])
+    split = float(p[2 * N_CONTROL + 1])
+    t = ION_FRACTION_TOL
+    lo = max(0.20 - t, 1.0 - hp - (0.20 + t))
+    hi = min(0.20 + t, 1.0 - hp - (0.20 - t))
+    h2p = lo + split * (hi - lo)
+    return hp, h2p, 1.0 - hp - h2p
+
+
 def unpack_params(params, template):
     p = clip_params(params)
 
     ratio_controls = p[0:N_CONTROL]
     h2_controls = p[N_CONTROL:2 * N_CONTROL]
-    ion_total_over_ne = float(p[2 * N_CONTROL])
-    hp_fraction = float(p[2 * N_CONTROL + 1])
-    h2p_fraction = 1.0 - hp_fraction
+    hp_fraction, h2p_fraction, h3p_fraction = ion_fractions(p)
 
     ratio_profile = interpolate_controls(
         template,
@@ -908,11 +932,11 @@ def unpack_params(params, template):
         errors="raise"
     ).values.astype(float)
 
-    total_positive = ion_total_over_ne * ne
+    total_positive = ne + template["nHm"].values.astype(float)
 
     nHp = hp_fraction * total_positive
     nH2p = h2p_fraction * total_positive
-    nH3p = np.zeros_like(total_positive)
+    nH3p = h3p_fraction * total_positive
 
     return {
         "ratio_controls": ratio_controls,
@@ -921,7 +945,8 @@ def unpack_params(params, template):
         "h2_units_profile": h2_units_profile,
         "nH": nH,
         "nH2": nH2,
-        "ion_total_over_ne": ion_total_over_ne,
+        "total_negative": total_positive,
+        "h3p_fraction": h3p_fraction,
         "hp_fraction": hp_fraction,
         "h2p_fraction": h2p_fraction,
         "nHp": nHp,
@@ -946,26 +971,23 @@ def constraint_report(params, template):
         and np.all(nH2 <= NH2_DENSITY_BOUNDS_M3[1] * (1.0 + 1.0e-12))
     )
 
-    ion_ratio = float(prof["ion_total_over_ne"])
-
-    ion_ok = (
-        ion_ratio >= ION_TOTAL_OVER_NE_BOUNDS[0] - 1.0e-12
-        and ion_ratio <= ION_TOTAL_OVER_NE_BOUNDS[1] + 1.0e-12
-    )
-
-    h3_ok = bool(np.all(np.asarray(prof["nH3p"]) == 0.0))
-
+    fractions = np.array([prof["hp_fraction"], prof["h2p_fraction"], prof["h3p_fraction"]])
+    positive = prof["nHp"] + prof["nH2p"] + prof["nH3p"]
+    qn_error = float(np.max(np.abs(positive / prof["total_negative"] - 1.0)))
+    ion_ok = bool(np.all(np.abs(fractions - ION_TARGET) <= ION_FRACTION_TOL + 1e-12)
+                  and qn_error <= 1e-12)
     return {
-        "constraints_ok": bool(ratio_ok and nH2_ok and ion_ok and h3_ok),
+        "constraints_ok": bool(ratio_ok and nH2_ok and ion_ok),
         "ratio_min": float(np.min(ratio)),
         "ratio_max": float(np.max(ratio)),
         "nH2_min_m3": float(np.min(nH2)),
         "nH2_max_m3": float(np.max(nH2)),
-        "ion_total_over_ne": ion_ratio,
-        "hp_fraction": float(prof["hp_fraction"]),
-        "h2p_fraction": float(prof["h2p_fraction"]),
-        "nH3p_zero": h3_ok,
+        "max_qn_residual": qn_error,
+        "hp_fraction": float(fractions[0]),
+        "h2p_fraction": float(fractions[1]),
+        "h3p_fraction": float(fractions[2]),
     }
+
 
 
 def initial_params_from_template(template):
@@ -1030,27 +1052,8 @@ def initial_params_from_template(template):
         raw_h2_units[order]
     )
 
-    total_positive = nHp + nH2p + nH3p
-
-    if np.any(ne <= 0.0):
-        raise RuntimeError("Template ne must be positive.")
-    if np.any(total_positive <= 0.0):
-        raise RuntimeError("Template positive-ion total must be positive.")
-
-    ion_ratio = float(np.median(total_positive / ne))
-
-    h12 = nHp + nH2p
-
-    if np.any(h12 <= 0.0):
-        hp_fraction = 0.5
-    else:
-        hp_fraction = float(np.median(nHp / h12))
-
-    p = np.concatenate([
-        ratio_controls,
-        h2_controls,
-        np.array([ion_ratio, hp_fraction], dtype=float)
-    ])
+    # Always start at the requested composition, regardless of template ions.
+    p = np.concatenate([ratio_controls, h2_controls, np.array([0.60, 0.50])])
 
     return clip_params(p)
 
@@ -1072,8 +1075,7 @@ def write_input(params, template, destination):
     df["nHp"] = prof["nHp"]
     df["nH2p"] = prof["nH2p"]
 
-    # Explicitly write exact zeros, rather than relying on floating arithmetic.
-    df["nH3p"] = 0.0
+    df["nH3p"] = prof["nH3p"]
 
     columns = [
         "PID", "ne", "Te", "nH", "nH2",
@@ -1096,7 +1098,7 @@ def write_input(params, template, destination):
                     float(row["nH2"]),
                     float(row["nHp"]),
                     float(row["nH2p"]),
-                    0.0,
+                    float(row["nH3p"]),
                     float(row["nHm"]),
                 )
             )
@@ -1118,13 +1120,13 @@ def write_input(params, template, destination):
             )
         )
 
-    if not np.all(
-        pd.to_numeric(
-            check["nH3p"],
-            errors="raise"
-        ).values.astype(float) == 0.0
-    ):
-        raise RuntimeError("Generated CRM input violated nH3p=0.")
+    ions = check[["nHp", "nH2p", "nH3p"]].values.astype(float)
+    negative = check["ne"].values + check["nHm"].values
+    total = ions.sum(axis=1)
+    if not np.allclose(total, negative, rtol=1e-12, atol=0):
+        raise RuntimeError("Written CRM input violates exact charge balance.")
+    if np.any(np.abs(ions / total[:, None] - ION_TARGET) > ION_FRACTION_TOL + 1e-12):
+        raise RuntimeError("Written CRM input violates ion composition bounds.")
 
     return file_sha256(destination)
 
@@ -1184,6 +1186,31 @@ def run_crm(respect_deadline=True):
         )
 
     return runtime, stdout, file_sha256(CRM_OUTPUT_FILE)
+
+
+def verify_crm_densities(output_df, input_path):
+    """Reject mismatched CRM output (wrong file or overwritten ion densities)."""
+    expected = pd.read_csv(input_path, sep=r"\s+").set_index("PID")
+    actual = output_df.set_index("PID").loc[expected.index]
+    negative = expected["ne"].values + expected["nHm"].values
+    for src, dst in (("ne", "e-"), ("nHp", "H+"), ("nH2p", "H2+"),
+                     ("nH3p", "H3+"), ("nHm", "H-"), ("nH", "H"), ("nH2", "H2")):
+        if dst not in actual.columns:
+            raise RuntimeError("Cannot verify CRM densities: missing output column " + dst)
+        got = pd.to_numeric(actual[dst], errors="raise").values.astype(float)
+        want = expected[src].values.astype(float)
+        tolerance = CRM_DENSITY_RTOL * np.maximum(np.abs(want), 1e-10 * negative)
+        if np.any(~np.isfinite(got)) or np.any(np.abs(got - want) > tolerance):
+            raise RuntimeError("CRM output density {} differs from input {}. "
+                               "Check effective inputfile and lcond settings; "
+                               "maximum discrepancy = {:.6e} m^-3.".format(dst, src, np.max(np.abs(got-want))))
+    positive = sum(actual[c].values.astype(float) for c in ("H+", "H2+", "H3+"))
+    neg = actual["e-"].values.astype(float) + actual["H-"].values.astype(float)
+    if "Cs+" in actual.columns:
+        positive = positive + actual["Cs+"].values.astype(float)
+    residual = np.max(np.abs((positive - neg) / neg))
+    if not np.isfinite(residual) or residual > 2 * CRM_DENSITY_RTOL:
+        raise RuntimeError("CRM output is not quasineutral within rounding tolerance: {:.6g}".format(residual))
 
 
 def read_integrals():
@@ -1624,10 +1651,8 @@ def params_to_columns(params):
         row["ratio_PID{}".format(pid)] = float(p[i])
         row["nH2_1e19_PID{}".format(pid)] = float(p[N_CONTROL + i])
 
-    row["ion_total_over_ne"] = float(p[2 * N_CONTROL])
-    row["f_Hp"] = float(p[2 * N_CONTROL + 1])
-    row["f_H2p"] = 1.0 - float(p[2 * N_CONTROL + 1])
-    row["f_H3p"] = 0.0
+    row["f_Hp"], row["f_H2p"], row["f_H3p"] = ion_fractions(p)
+    row["h2_split_control"] = float(p[2 * N_CONTROL + 1])
 
     return row
 
@@ -1671,7 +1696,7 @@ def result_record(
         "ratio_max": report["ratio_max"],
         "nH2_min_m3": report["nH2_min_m3"],
         "nH2_max_m3": report["nH2_max_m3"],
-        "positive_ion_over_ne": report["ion_total_over_ne"],
+        "max_qn_residual": report["max_qn_residual"],
         "Ha_integral": values["Ha-s"],
         "Hb_integral": values["Hb-s"],
         "Hg_integral": values["Hg-s"],
@@ -1796,7 +1821,8 @@ def load_compatible_history():
                 continue
             if int(float(row["cs_setting"])) != CS_SETTING:
                 continue
-            if abs(float(row.get("f_H3p", 0.0))) > 1.0e-15:
+            fractions = np.array([float(row[k]) for k in ("f_Hp", "f_H2p", "f_H3p")])
+            if not np.all(np.abs(fractions - ION_TARGET) <= ION_FRACTION_TOL + 1e-12):
                 continue
 
             candidate = row_to_candidate(row)
@@ -1903,6 +1929,7 @@ def evaluate(params, source, force_fresh=False, allow_after_deadline=False):
     fresh_runtime_samples.append(float(runtime))
 
     values, output_df = read_integrals()
+    verify_crm_densities(output_df, CRM_INPUT_FILE)
 
     print(
         "   CRM opl = {:.6g} .. {:.6g} m; line outputs were divided by opl "
@@ -1999,13 +2026,14 @@ def evaluate(params, source, force_fresh=False, allow_after_deadline=False):
 
     print(
         "   ratio {:.3f}..{:.3f} | nH2 {:.3e}..{:.3e} | "
-        "ions/ne {:.3f} | Hp {:.1f}%".format(
+        "H+:H2+:H3+ = {:.2f}:{:.2f}:{:.2f}%".format(
             report["ratio_min"],
             report["ratio_max"],
             report["nH2_min_m3"],
             report["nH2_max_m3"],
-            report["ion_total_over_ne"],
             100.0 * report["hp_fraction"],
+            100.0 * report["h2p_fraction"],
+            100.0 * report["h3p_fraction"],
         ),
         flush=True
     )
@@ -2263,9 +2291,9 @@ def parameter_fd_step(i):
         return FD_NH2_1E19_STEP
 
     if i == 2 * N_CONTROL:
-        return FD_ION_RATIO_STEP
+        return FD_HP_FRACTION_STEP
 
-    return FD_HP_FRACTION_STEP
+    return FD_H2_SPLIT_STEP
 
 
 def finite_difference_jacobian(center_candidate, local_label):
@@ -2774,7 +2802,7 @@ def bound_diagnostics(params):
         +
         ["nH2_1e19_PID{}".format(pid) for pid in CONTROL_PIDS.astype(int).tolist()]
         +
-        ["ions_over_ne", "f_Hp"]
+        ["f_Hp", "H2_split_control"]
     )
 
     for i in range(N_PARAMS):
@@ -2955,11 +2983,9 @@ def write_summary(final_candidate, local_results):
 
         f.write("Hard constraints:\n")
         f.write(
-            "  {:.8g} <= (nHp+nH2p)/ne <= {:.8g}\n".format(
-                ION_TOTAL_OVER_NE_BOUNDS[0], ION_TOTAL_OVER_NE_BOUNDS[1]
-            )
+            "  H+:H2+:H3+ = 60:20:20 +/- {:.3g} percentage points each\n".format(100 * ION_FRACTION_TOL)
         )
-        f.write("  nH3p = 0 exactly\n")
+        f.write("  nHp + nH2p + nH3p = ne + nHm exactly\n")
         f.write(
             "  {:.8g} <= nH/nH2 <= {:.8g}\n".format(
                 DISSOCIATION_RATIO_BOUNDS[0], DISSOCIATION_RATIO_BOUNDS[1]
@@ -3037,14 +3063,15 @@ def write_summary(final_candidate, local_results):
             )
         )
         f.write(
-            "(nHp+nH2p)/ne = {:.8f}\n".format(
-                report["ion_total_over_ne"]
+            "Maximum input relative charge residual = {:.3e}\n".format(
+                report["max_qn_residual"]
             )
         )
         f.write(
-            "H+:H2+:H3+ = {:.3f}:{:.3f}:0.000 %\n".format(
+            "H+:H2+:H3+ = {:.3f}:{:.3f}:{:.3f} %\n".format(
                 100.0 * report["hp_fraction"],
-                100.0 * report["h2p_fraction"]
+                100.0 * report["h2p_fraction"],
+                100.0 * report["h3p_fraction"]
             )
         )
         f.write("\n")
@@ -3098,6 +3125,7 @@ def main():
     global SUMMARY_FILE
     global DRIVER_PID
     global OBJECTIVE_VERSION
+    global CRM_RUNTIME_CONFIG
 
     ensure_exists(
         CRM_ROOT,
@@ -3223,7 +3251,11 @@ def main():
         len(TEMPLATE),
         CS_SETTING,
         CRM_ROOT,
+        path_mode=args.crm_path_mode,
     )
+
+    print("CRM namelist path mode: {}".format(args.crm_path_mode), flush=True)
+    print("CRM runtime config: {}".format(CRM_RUNTIME_CONFIG), flush=True)
 
     CONFIG_SHA256 = file_sha256(
         CRM_RUNTIME_CONFIG
@@ -3329,9 +3361,9 @@ def main():
     )
 
     print(
-        "Hard constraints: H3+=0 | ions/ne {:.4g}..{:.4g} | "
+        "Hard constraints: 60/20/20 +/- {:.3g} percentage points each | exact charge balance | "
         "nH/nH2 {:.4g}..{:.4g} | nH2 {:.4g}..{:.4g}".format(
-            ION_TOTAL_OVER_NE_BOUNDS[0], ION_TOTAL_OVER_NE_BOUNDS[1],
+            100.0 * ION_FRACTION_TOL,
             DISSOCIATION_RATIO_BOUNDS[0], DISSOCIATION_RATIO_BOUNDS[1],
             NH2_DENSITY_BOUNDS_M3[0], NH2_DENSITY_BOUNDS_M3[1],
         ),
@@ -3371,13 +3403,14 @@ def main():
 
     print(
         "Projected initial state: ratio {:.3f}..{:.3f}, "
-        "nH2 {:.3e}..{:.3e}, ions/ne {:.3f}, Hp {:.1f}%".format(
+        "nH2 {:.3e}..{:.3e}, H+:H2+:H3+ {:.1f}:{:.1f}:{:.1f}%".format(
             initial_report["ratio_min"],
             initial_report["ratio_max"],
             initial_report["nH2_min_m3"],
             initial_report["nH2_max_m3"],
-            initial_report["ion_total_over_ne"],
             100.0 * initial_report["hp_fraction"],
+            100.0 * initial_report["h2p_fraction"],
+            100.0 * initial_report["h3p_fraction"],
         ),
         flush=True
     )
@@ -3537,6 +3570,8 @@ def main():
         ),
         flush=True
     )
+
+    print("Final H+:H2+:H3+ = {:.3f}:{:.3f}:{:.3f}%".format(*(100.0 * f for f in ion_fractions(final_verified["params"]))), flush=True)
 
     final_spatial = driver_concentration_metrics(
         final_verified["params"]
