@@ -25,7 +25,8 @@ python3 crm_autofit.py \
     --targets-file oes_targets_MINION_example.txt \
     --control-pids 6,8,10,12,13 \
     --driver-pid 13 \
-    --require-cs 11
+    --require-cs 11 \
+    --ion-fraction-tolerance 0.05
 
 If needed, modify the file paths in input_nofit.txt to follow your personal
 file architecture (the script will let you know if this is the case)
